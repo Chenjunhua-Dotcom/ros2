@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PX4 + ROS2 + OpenCV 无人机视觉目标追踪节点"""
+"""PX4 + ROS2 + OpenCV 无人机视觉目标追踪节点（第二版）"""
 
 import time
 import cv2
