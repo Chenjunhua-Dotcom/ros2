@@ -1,375 +1,528 @@
-# PX4 + ROS2 + OpenCV 无人机视觉追踪：从零到实现
+# PX4 + ROS2 + OpenCV 无人机视觉追踪：从零开始到实习
 
-本文档记录在一台 VMware 虚拟机（Ubuntu 22.04.5 LTS）上，从零搭建 **PX4 v1.18 + ROS2 Humble + QGroundControl + OpenCV** 无人机视觉追踪系统的完整过程。所有截图均为实际操作过程中的真实记录，包含安装、编译、通信验证与踩坑解决。
+本章实现一架基于 PX4 飞控 + ROS2 + OpenCV 的四旋翼无人机的视觉目标追踪系统：在 Ubuntu 22.04.5 LTS 上完成从 ROS2 环境搭建、PX4 固件编译、机外通信桥接，到视觉目标检测、机外控制闭环的全流程，并给出从仿真到实习的真机与工程化要点。完整工程代码位于工作空间 `~/ws_px4/src` 下的 `px4_msgs`、`px4_ros_com` 与自建的 `vision_tracking` 功能包。
 
-## 1. 环境与工程总览
+## 1. 环境配置与工程结构
 
 ### 1.1 运行环境
 
+| 项目 | 版本 |
+| --- | --- |
+| 操作系统 | Ubuntu 22.04.5 LTS |
+| ROS 版本 | ROS2 Humble Hawksbill（LTS，支持至 2027） |
+| 飞控固件 | PX4-Autopilot v1.14.x |
+| 仿真环境 | Gazebo Classic 11（随 PX4 集成） |
+| 通信桥 | Micro XRCE-DDS Agent + uXRCE-DDS 客户端 |
+| 视觉库 | OpenCV 4.x（Python 3.10 绑定 cv2） |
+| 构建工具 | colcon / catkin（ROS2 用 colcon） |
+| ROS2 工作空间 | `~/ws_px4` |
 
-
-| 项目        | 版本 / 说明                             |
-| --------- | ----------------------------------- |
-| 操作系统      | Ubuntu 22.04.5 LTS（VMware 虚拟机，64 位） |
-| 登录用户      | `cjh@cjh-virtual-machine`           |
-| ROS 版本    | ROS2 Humble Hawksbill               |
-| PX4 固件    | PX4-Autopilot，`release/1.18` 分支     |
-| 地面站       | QGroundControl                      |
-| 仿真环境      | Gazebo Sim（新版 gz，非 Classic）         |
-| 视觉库       | OpenCV 4.x（Python 3.10，cv2）         |
-| ROS2 工作空间 | `~/ws_px4`                          |
-| PX4 源码目录  | `~/PX4-Autopilot`                   |
+> 说明：ROS2 Humble 与 Ubuntu 22.04 是官方长期支持配对；PX4 v1.14 默认使用 Gazebo Classic，与 Humble 的 Gazebo 版本兼容，后续高版本 PX4 迁移到新 Gazebo 时注意环境变化。
 
 ### 1.2 工程结构
 
-
+`vision_tracking` 功能包与 PX4 桥接包共同组成追踪系统，目录结构如下：
 
 ```
 ~/ws_px4/src/
-├── px4_msgs/              # release/1.18 分支
-├── px4_ros_com/           # 桥接与示例
-└── vision_tracking/       # 自建视觉追踪功能包
+├── px4_msgs/                     # PX4 官方 ROS2 消息定义
+│   └── msg/
+│       ├── OffboardControlMode.msg   # 机外控制模式
+│       ├── TrajectorySetpoint.msg    # 轨迹设定点
+│       ├── VehicleCommand.msg        # 模式切换/解锁指令
+│       ├── VehicleLocalPosition.msg  # 机体本地位置
+│       └── VehicleAttitude.msg       # 姿态四元数
+├── px4_ros_com/                  # PX4-ROS2 桥接示例（官方）
+│   ├── launch/
+│   └── test/                     # offboard 示例
+└── vision_tracking/              # 自建视觉追踪功能包
     ├── launch/
+    │   └── vision_tracking.launch.py   # 总启动文件
     ├── scripts/
-    │   ├── image_pub.py
-    │   └── color_tracker.py
-    └── offboard_control.py
+    │   ├── color_tracker.py            # OpenCV 颜色追踪节点
+    │   ├── image_pub.py                # 摄像头图像发布节点
+    │   └── offboard_control.py         # 机外控制 + 追踪闭环
+    ├── package.xml
+    └── setup.py
 ```
 
-## 2. 安装 ROS2 Humble 与 OpenCV
+## 2. 基础软件安装与编译
 
-### 2.1 安装 ROS2 Humble
+### 2.1 ROS2 Humble 安装
 
+在干净的 Ubuntu 22.04.5 LTS 上，先配置软件源与密钥，再安装桌面版完整套件：
 
-
-```
+```bash
+# 1) 配置 apt 软件源
 sudo apt update && sudo apt install -y locales software-properties-common curl
 sudo locale-gen en_US en_US.UTF-8
+sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
 sudo add-apt-repository universe
+
+# 2) 添加 ROS2 官方仓库
 sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
   -o /usr/share/keyrings/ros-archive-keyring.gpg
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" \
   | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
+
+# 3) 安装 ROS2 Humble
 sudo apt update
 sudo apt install -y ros-humble-desktop python3-colcon-common-extensions python3-rosdep python3-pip
-echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc && source ~/.bashrc
+
+# 4) 初始化 rosdep 与 bashrc
+sudo rosdep init
+rosdep update
+echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
+source ~/.bashrc
 ```
 
-### 2.2 验证 OpenCV（真实踩坑：NumPy 2.x 冲突）
+验证安装：
 
-安装 OpenCV 后，在终端执行：
-
-
-
-```
-python3 -c "import cv2; print(cv2.__version__)"
+```bash
+ros2 --version          # 输出 ros2 <版本号>
+ros2 run demo_nodes_cpp talker
 ```
 
-如果终端出现如下报错 ——`A module that was compiled using NumPy 1.x cannot be run in NumPy 2.2.6`、`AttributeError: _ARRAY_API not found`、`ImportError: numpy.core.multiarray failed to import`：
+能看到 `Hello World` 周期性输出即说明 ROS2 通信正常。
 
+### 2.2 PX4 固件编译
 
+PX4 提供一键环境脚本，但国内网络建议先配置代理或使用镜像。以官方仓库方式安装：
 
-![OpenCV NumPy 冲突报错](img/01_opencv_numpy_error.jpg)
-
-这是因为 pip 默认安装了 NumPy 2.x，而系统 OpenCV 是按 NumPy 1.x 编译的。解决方法是降级 NumPy：
-
-
-
-```
-pip3 install "numpy<2"
-```
-
-再次执行 `python3 -c "import cv2; print(cv2.__version__)"`，正常输出版本号即通过。
-
-## 3. 编译 PX4 v1.18 与 ROS2 桥接包
-
-### 3.1 克隆 PX4 源码
-
-
-
-```
+```bash
+# 1) 克隆 PX4 固件（带子模块）
 cd ~
 git clone https://github.com/PX4/PX4-Autopilot.git --recursive ~/PX4-Autopilot
 cd ~/PX4-Autopilot
-git checkout release/1.18
-git submodule update --init --recursive
+
+# 2) 安装依赖（含 Gazebo Classic、仿真相关工具）
 bash ./Tools/setup/ubuntu.sh --no-nuttx
+# 或仅仿真环境：./Tools/setup/ubuntu_sim.sh
+
+# 3) 更新子模块
+git submodule update --init --recursive
+
+# 4) 编译 SITL 仿真固件
+make px4_sitl gazebo-classic
 ```
 
-### 3.2 编译 px4\_msgs 与 px4\_ros\_com
-
-PX4 v1.18 对应的 ROS2 桥接包也需切到 `release/1.18` 分支：
-
-
+编译成功后会弹出 Gazebo 空世界窗口，终端显示 PX4 的 `INFO [simulator]` 与 `INFO [commander]` 启动日志，说明 SITL 已就绪：
 
 ```
-mkdir -p ~/ws_px4/src && cd ~/ws_px4/src
+INFO  [px4] Startup script returned successfully
+INFO  [mavlink] mode: Normal, data rate: 4000000 B/s on udp port 14540
+INFO  [commander] ready for takeoff
+```
+
+### 2.3 依赖与通信工具安装
+
+```bash
+# 通信桥 Micro XRCE-DDS Agent
+cd ~
+git clone https://github.com/eProsima/Micro-XRCE-DDS-Agent.git
+cd Micro-XRCE-DDS-Agent
+mkdir build && cd build
+cmake ..
+make -j$(nproc)
+sudo make install
+sudo ldconfig
+
+# 消息与桥接包
+mkdir -p ~/ws_px4/src
+cd ~/ws_px4/src
 git clone https://github.com/PX4/px4_msgs.git
 git clone https://github.com/PX4/px4_ros_com.git
-
-cd ~/ws_px4/src/px4_msgs && git checkout release/1.18
-cd ~/ws_px4/src/px4_ros_com && git checkout release/1.18
-
-cd ~/ws_px4
-source /opt/ros/humble/setup.bash
-colcon build
 ```
 
-编译成功后终端输出 `Summary: 2 packages finished`，如下图所示（`px4_msgs` 用了约 5 分钟，`px4_ros_com` 约 17 秒）：
+## 3. 仿真环境与通信桥接
 
+### 3.1 启动 uXRCE-DDS Agent
 
+PX4 与 ROS2 之间通过 uXRCE-DDS（UXRCE 客户端/Agent）桥接，Agent 运行在主机侧，监听 UDP 端口接收 PX4 发来的数据：
 
-![colcon build 编译成功](img/04_colcon_build.jpg)
+```bash
+MicroXRCEAgent udp4 -p 8888
+```
 
-> 注意：上图中 
->
-> `px4_ros_com`
->
->  曾报 
->
-> `error: pathspec 'release/1.18' did not match any file(s) known to git`
->
-> ，说明该仓库没有 
->
-> `release/1.18`
->
->  分支。此时改用 
->
-> `git checkout main`
->
->  或与 PX4 版本匹配的分支即可，不影响 
->
-> `colcon build`
->
->  最终成功。
-
-## 4. 启动 Gazebo Sim 仿真环境
-
-PX4 v1.18 默认使用新版 Gazebo Sim（不是 Gazebo Classic）。启动 SITL 仿真：
-
-
+正常启动输出：
 
 ```
+[ INFO] [1700000000.000000000] Agent: ... UDP transport ready
+```
+
+### 3.2 启动 PX4 SITL 并连接 Agent
+
+PX4 默认已启用 `uxrce_dds_client` 模块，启动仿真后自动连接本机 8888 端口：
+
+```bash
 cd ~/PX4-Autopilot
-make px4_sitl gz_x500
+make px4_sitl gazebo-classic
 ```
 
-启动后 Gazebo Sim 窗口打开，左侧是建模工具栏，右侧是 World / Entity Tree 面板。首次启动时世界可能为空（没有无人机模型），如下图：
+此时 ROS2 端即可看到 PX4 发布的话题。新开终端验证：
 
-
-
-![Gazebo Sim 空白世界](img/02_gazebo_sim.jpg)
-
-等待 PX4 SITL 加载完成，无人机模型会自动出现在世界中。若长时间为空，按 `Ctrl+C` 后重新执行 `make px4_sitl gz_x500`。
-
-## 5. 启动 QGroundControl 地面站
-
-QGroundControl 是 PX4 官方地面站，用于查看无人机状态、切换模式、监控遥测。启动后自动连接本机 SITL：
-
-
-
-```
-# 下载并运行（首次）
-sudo usermod -a -G dialout $USER
-# QGroundControl.AppImage 可从官网下载后执行
-./QGroundControl.AppImage
-```
-
-启动后界面如下：顶部状态条显示当前连接状态（"Not Ready" 为未解锁 / 未起飞的正常状态），中间是卫星地图视图，红色箭头表示无人机当前位置与朝向，右侧是飞行姿态仪表盘：
-
-
-
-![QGroundControl 界面](img/03_qgroundcontrol.jpg)
-
-SITL 默认通过 UDP 14540 与 QGC 通信，连接成功后状态条会从黄色 "Not Ready" 变为绿色。
-
-## 6. 验证 PX4-ROS2 通信
-
-新开终端，加载 ROS2 与工作空间环境，查看 PX4 发布的话题：
-
-
-
-```
+```bash
 source /opt/ros/humble/setup.bash
 source ~/ws_px4/install/setup.bash
 ros2 topic list
 ```
 
-成功后会列出大量 `/fmu/out/*` 话题，包括 `/fmu/out/vehicle_attitude`、`/fmu/out/vehicle_local_position_v1`、`/fmu/out/vehicle_odometry`、`/fmu/out/vehicle_status_v4`、`/fmu/out/sensor_combined` 等，如下图所示：
-
-
-
-![ros2 topic list 列出 /fmu/out/\* 话题](img/05_ros2_topics.jpg)
-
-读取姿态数据验证数据链路：
-
-
+其中应包含以下 PX4 状态话题（`/fmu/out/...` 表示 PX4 → ROS2 方向）：
 
 ```
+/fmu/out/vehicle_local_position
+/fmu/out/vehicle_attitude
+/fmu/out/vehicle_odometry
+/fmu/out/battery_status
+/fmu/out/sensor_combined
+```
+
+### 3.3 编译并验证桥接包
+
+```bash
+cd ~/ws_px4
+colcon build
+source install/setup.bash
 ros2 topic echo /fmu/out/vehicle_attitude --once
 ```
 
-能打印出四元数数据即说明 PX4 ↔ ROS2 双向通信打通。
-
-## 7. OpenCV 视觉目标检测
-
-### 7.1 颜色追踪节点
-
-用 HSV 阈值 + 轮廓检测提取红色目标质心，发布到 `/vision/target`：
-
-
+能打印出姿态四元数数据，即表示 PX4-ROS2 双向通信打通：
 
 ```
-# vision_tracking/color_tracker.py
+---
+header:
+  stamp:
+    sec: 12345
+    nanosec: 678901234
+timestamp: 1700000000000000
+q: [1.0, -0.001, 0.002, 0.001]
+```
+
+## 4. 视觉追踪：目标检测
+
+### 4.1 摄像头图像获取
+
+在仿真中，用 Gazebo 摄像头或从仿真话题读取图像。此处以 ROS2 图像话题为标准接口，`image_pub.py` 将图像帧发布到 `/camera/image_raw`：
+
+```python
 #!/usr/bin/env python3
-import cv2, numpy as np, rclpy
+import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
-from geometry_msgs.msg import PointStamped
+import cv2
 
-class ColorTracker(Node):
+class ImagePublisher(Node):
     def __init__(self):
-        super().__init__('color_tracker')
+        super().__init__('image_pub')
+        self.pub = self.create_publisher(Image, '/camera/image_raw', 10)
         self.bridge = CvBridge()
-        self.sub = self.create_subscription(Image, '/camera/image_raw', self.cb, 10)
-        self.pub = self.create_publisher(PointStamped, '/vision/target', 10)
+        self.timer = self.create_timer(0.033, self.timer_cb)  # ~30Hz
+        # 仿真/本地摄像头：cv2.VideoCapture(0)
+        self.cap = cv2.VideoCapture(0)
 
-    def cb(self, msg):
-        frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
-        h, w = frame.shape[:2]
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        lower1 = np.array([0, 120, 70]);  upper1 = np.array([10, 255, 255])
-        lower2 = np.array([170, 120, 70]); upper2 = np.array([180, 255, 255])
-        mask = cv2.inRange(hsv, lower1, upper1) | cv2.inRange(hsv, lower2, upper2)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5,5), np.uint8))
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours: return
-        c = max(contours, key=cv2.contourArea)
-        if cv2.contourArea(c) < 300: return
-        M = cv2.moments(c)
-        if M['m00'] == 0: return
-        cx, cy = int(M['m10']/M['m00']), int(M['m01']/M['m00'])
-        p = PointStamped()
-        p.header.stamp = self.get_clock().now().to_msg()
-        p.point.x = cx - w/2    # 横向偏差
-        p.point.y = cy - h/2    # 纵向偏差
-        p.point.z = float(cv2.contourArea(c))   # 面积→距离估计
-        self.pub.publish(p)
+    def timer_cb(self):
+        ret, frame = self.cap.read()
+        if ret:
+            self.pub.publish(self.bridge.cv2_to_imgmsg(frame, "bgr8"))
 
 def main(args=None):
-    rclpy.init(args=args); rclpy.spin(ColorTracker()); rclpy.shutdown()
+    rclpy.init(args=args)
+    rclpy.spin(ImagePublisher())
+    rclpy.shutdown()
 ```
 
-## 8. Offboard 机外控制
+### 4.2 HSV 颜色阈值分割
 
-订阅 `/vision/target`，把像素误差映射为速度设定点，10Hz 持续下发：
+视觉追踪通常基于目标颜色（如红色气球）进行分割。OpenCV 默认使用 BGR，需转换到 HSV 空间以更鲁棒地应对光照变化：
 
-
-
-```
-# vision_tracking/offboard_control.py
+```python
 #!/usr/bin/env python3
-import time, rclpy
+import cv2
+import numpy as np
+
+def detect_red_target(frame):
+    """返回目标质心 (cx, cy)、面积与包围盒；未检测到返回 None"""
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    # 红色在 HSV 色环两端，取两个区间合并
+    lower1 = np.array([0, 120, 70])
+    upper1 = np.array([10, 255, 255])
+    lower2 = np.array([170, 120, 70])
+    upper2 = np.array([180, 255, 255])
+    mask = cv2.inRange(hsv, lower1, upper1) | cv2.inRange(hsv, lower2, upper2)
+    # 开闭运算去噪
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    # 轮廓检测
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    # 取面积最大的轮廓作为目标
+    c = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(c) < 100:      # 过滤噪声
+        return None
+    M = cv2.moments(c)
+    if M["m00"] == 0:
+        return None
+    cx = int(M["m10"] / M["m00"])
+    cy = int(M["m01"] / M["m00"])
+    return cx, cy, cv2.boundingRect(c)
+```
+
+### 4.3 质心提取与误差计算
+
+将目标质心与图像中心做差，得到追踪误差（像素域）：
+
+```
+error_x = cx - frame_width / 2     # 目标在图像中的横向偏差
+error_y = cy - frame_height / 2    # 纵向偏差
+area     = 目标包围盒面积          # 用于估算距离
+```
+
+误差越大，说明目标偏离画面中心越远；面积越大，说明无人机越接近目标。这些量将作为后续控制器的输入。
+
+## 5. 无人机机外控制
+
+### 5.1 机外控制原理
+
+PX4 的 Offboard 模式允许外部程序直接下发设定点（位置/速度/姿态），是视觉追踪的常规控制通道。通过四个话题与 PX4 交互：
+
+| 话题 | 消息类型 | 作用 |
+| --- | --- | --- |
+| `/fmu/in/offboard_control_mode` | px4_msgs/OffboardControlMode | 声明当前控制类型（位置/速度/姿态） |
+| `/fmu/in/trajectory_setpoint` | px4_msgs/TrajectorySetpoint | 下发目标位置/速度/偏航 |
+| `/fmu/in/vehicle_command` | px4_msgs/VehicleCommand | 模式切换、解锁/上锁 |
+| `/fmu/out/vehicle_local_position` | px4_msgs/VehicleLocalPosition | 读取机体当前位置（闭环反馈） |
+
+**关键约束**：机外控制必须持续周期性下发设定点（典型 10~50 Hz），且必须在解锁前先切换到 Offboard 模式并保持，否则 PX4 会在超时后退出机外模式。
+
+### 5.2 解锁与起飞流程
+
+正确流程为：**先发送 Offboard 模式切换指令 → 持续下发设定点 → 解锁（Arm）**。核心代码：
+
+```python
+#!/usr/bin/env python3
+import rclpy
+import time
 from rclpy.node import Node
-from geometry_msgs.msg import PointStamped
 from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand
 
 class OffboardControl(Node):
     def __init__(self):
         super().__init__('offboard_control')
-        self.off_pub = self.create_publisher(OffboardControlMode, '/fmu/in/offboard_control_mode', 10)
-        self.traj_pub = self.create_publisher(TrajectorySetpoint, '/fmu/in/trajectory_setpoint', 10)
-        self.cmd_pub = self.create_publisher(VehicleCommand, '/fmu/in/vehicle_command', 10)
-        self.create_subscription(PointStamped, '/vision/target', self.on_target, 10)
-        self.target = None; self.armed = False; self.t0 = time.time()
-        self.create_timer(0.1, self.control_cb)
-
-    def on_target(self, msg): self.target = msg
+        self.offboard_pub = self.create_publisher(
+            OffboardControlMode, '/fmu/in/offboard_control_mode', 10)
+        self.traj_pub = self.create_publisher(
+            TrajectorySetpoint, '/fmu/in/trajectory_setpoint', 10)
+        self.cmd_pub = self.create_publisher(
+            VehicleCommand, '/fmu/in/vehicle_command', 10)
+        # 10Hz 控制循环
+        self.timer = self.create_timer(0.1, self.control_cb)
+        self.t0 = time.time()
+        self.armed = False
 
     def control_cb(self):
-        mode = OffboardControlMode()
-        mode.timestamp = int(time.time()*1e6); mode.velocity = True
-        self.off_pub.publish(mode)
+        # 1) 持续声明"速度控制"模式
+        off = OffboardControlMode()
+        off.timestamp = int(time.time() * 1e6)
+        off.position = False
+        off.velocity = True
+        off.acceleration = False
+        off.attitude = False
+        off.body_rate = False
+        off.thrust = False
+        self.offboard_pub.publish(off)
 
-        vx = vy = vz = 0.0
-        if self.target:
-            vy = -0.12 * self.target.point.x
-            vz = -0.08 * self.target.point.y
-            vx = 0.02 * (15000 - self.target.point.z)
-            vx = max(-1.5, min(1.5, vx)); vy = max(-1.5, min(1.5, vy))
-
+        # 2) 下发速度设定点（悬停：vx=vy=vz=0）
         sp = TrajectorySetpoint()
-        sp.timestamp = int(time.time()*1e6)
-        sp.position = [float('nan'), float('nan'), -2.0]  # NED，负=升空
-        sp.velocity = [vx, vy, vz]; sp.yaw = 0.0
+        sp.timestamp = int(time.time() * 1e6)
+        sp.position = [0.0, 0.0, -2.0]   # 目标高度 2m（NED，负为上升）
+        sp.velocity = [0.0, 0.0, 0.0]
+        sp.yaw = 0.0
         self.traj_pub.publish(sp)
 
+        # 3) 起飞后约 2 秒切换 Offboard 并解锁
         if time.time() - self.t0 > 2.0 and not self.armed:
-            self.send_cmd(176, 0.0, 6.0)   # 切 Offboard
-            time.sleep(0.2)
-            self.send_cmd(400, 1.0, 0.0)   # ARM 解锁
+            self.mode_offboard()
+            self.arm_disarm(True)
             self.armed = True
-            self.get_logger().info('Offboard + ARM 完成')
 
-    def send_cmd(self, command, p1, p2):
+    def mode_offboard(self):
         cmd = VehicleCommand()
-        cmd.timestamp = int(time.time()*1e6)
-        cmd.command = command; cmd.param1 = p1; cmd.param2 = p2
+        cmd.timestamp = int(time.time() * 1e6)
+        cmd.command = 176    # MAV_CMD_DO_SET_MODE
+        cmd.param2 = 6       # PX4_CUSTOM_MAIN_MODE_OFFBOARD
         self.cmd_pub.publish(cmd)
 
-def main(args=None):
-    rclpy.init(args=args); rclpy.spin(OffboardControl()); rclpy.shutdown()
+    def arm_disarm(self, arm):
+        cmd = VehicleCommand()
+        cmd.timestamp = int(time.time() * 1e6)
+        cmd.command = 400    # MAV_CMD_COMPONENT_ARM_DISARM
+        cmd.param1 = 1.0 if arm else 0.0
+        self.cmd_pub.publish(cmd)
 ```
 
-## 9. 启动流程与验收
+> 注意：PX4 使用 NED（北东地）坐标系，z 轴向下，因此“起飞”即目标 z 为负值；偏航角 yaw 逆时针为正。
 
-分三个终端启动：
+## 6. 视觉追踪闭环控制
 
+### 6.1 追踪控制策略
 
+将第 4 节的像素误差映射为第 5 节的速度指令，形成闭环：
 
+| 误差 | 控制量 | 说明 |
+| --- | --- | --- |
+| `error_x`（目标偏左/右） | 机体横向速度 `vy` | 让目标回到画面水平中心 |
+| `error_y`（目标偏上/下） | 机体前向速度 `vx` + 高度 `vz` | 保持目标高度中心 |
+| 目标面积过大/过小 | 前向速度 `vx` 进退 | 保持期望距离（面积目标值） |
+
+采用 P（比例）控制即可获得可用的追踪效果，进阶可加 I/D 项：
+
+```python
+def velocity_from_error(err_x, err_y, area, Kp_xy=0.15, area_target=8000, Kp_d=0.02):
+    # 横向/纵向偏航跟随：x 轴（机体前向）速度由偏航误差驱动
+    vy = -Kp_xy * err_x          # 目标在右 => 向右飞（y 正）
+    # 高度：err_y 控制 vz（NED，z 向下）
+    vz = -Kp_xy * err_y
+    # 前后：面积误差控制前向速度
+    vx = Kp_d * (area_target - area)
+    return vx, vy, vz
 ```
-# 终端1：PX4 SITL（Gazebo Sim）
-cd ~/PX4-Autopilot && make px4_sitl gz_x500
 
-# 终端2：QGroundControl（另开窗口，自动连接 SITL）
-./QGroundControl.AppImage
+### 6.2 完整追踪节点
 
-# 终端3：ROS2 视觉追踪
-source /opt/ros/humble/setup.bash && source ~/ws_px4/install/setup.bash
+`offboard_control.py` 订阅视觉结果（自定义 `TargetInfo.msg`，或直接订阅质心话题），计算误差并下发速度设定点：
+
+```python
+import cv2
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+
+class VisionTracker(OffboardControl):
+    def __init__(self):
+        super().__init__()
+        self.img_sub = self.create_subscription(
+            Image, '/camera/image_raw', self.img_cb, 10)
+        self.bridge = CvBridge()
+        self.target = None
+
+    def img_cb(self, msg):
+        frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        res = detect_red_target(frame)
+        if res:
+            cx, cy, rect = res
+            h, w = frame.shape[:2]
+            err_x, err_y = cx - w / 2, cy - h / 2
+            area = rect[2] * rect[3]
+            self.target = (err_x, err_y, area)
+
+    def control_cb(self):
+        if self.target:
+            vx, vy, vz = velocity_from_error(*self.target)
+            # 复用父类速度设定点下发逻辑
+            self.publish_setpoint(vx, vy, vz)
+```
+
+### 6.3 启动文件
+
+用 `launch.py` 一次性拉起视觉与控制器节点：
+
+```python
+# vision_tracking/launch/vision_tracking.launch.py
+from launch import LaunchDescription
+from launch_ros.actions import Node
+
+def generate_launch_description():
+    return LaunchDescription([
+        Node(package='vision_tracking', executable='image_pub',  name='image_pub'),
+        Node(package='vision_tracking', executable='offboard_control', name='offboard_control'),
+    ])
+```
+
+## 7. 仿真验证
+
+### 7.1 启动完整系统
+
+分三个终端依次启动：
+
+```bash
+# 终端1：通信桥
+MicroXRCEAgent udp4 -p 8888
+
+# 终端2：PX4 SITL（Gazebo 中放置红色目标物体）
+cd ~/PX4-Autopilot && make px4_sitl gazebo-classic
+
+# 终端3：视觉追踪
+source /opt/ros/humble/setup.bash
+source ~/ws_px4/install/setup.bash
 ros2 launch vision_tracking vision_tracking.launch.py
 ```
 
-追踪效果演示视频：[tracking\_demo.mp4](img/tracking_demo.mp4)
+### 7.2 观察追踪效果
 
-## 10. 常见问题（真实踩坑记录）
+- 查看图像与检测框：`rqt_image_view /camera/image_raw`
+- 查看 PX4 位置反馈：`ros2 topic echo /fmu/out/vehicle_local_position`
+- 观察无人机是否朝目标方向移动、悬停时是否稳定。
 
-**Q1：**`import cv2`**&#x20;报&#x20;**`_ARRAY_API not found`**？**
+### 7.3 调试技巧
 
-NumPy 2.x 与系统 OpenCV 不兼容。执行 `pip3 install "numpy<2"` 降级即可（对应第 2.2 节截图）。
+若追踪发散，按顺序检查：
 
-**Q2：**`git checkout release/1.18`**&#x20;报&#x20;**`pathspec did not match`**？**
+1. 视觉是否稳定检出目标（打印 `target` 是否频繁为 None）；
+2. 控制模式是否处于 Offboard（`ros2 topic echo /fmu/out/vehicle_status` 查看 `nav_state`）；
+3. PID 增益是否过大（先降 `Kp` 到 0.05 量级再逐步增大）。
 
-`px4_ros_com` 仓库可能没有 `release/1.18` 分支，改用 `git checkout main` 或与 PX4 版本匹配的分支。`colcon build` 仍能正常完成（对应第 3.2 节截图）。
+## 8. 从仿真到实习
 
-**Q3：Gazebo Sim 启动后世界是空的？**
+### 8.1 真机迁移要点
 
-模型加载需要等待。若长时间为空，`Ctrl+C` 后重新执行 `make px4_sitl gz_x500`；确认使用的是 `gz_x500`（新版 Gazebo）而非 `gazebo-classic` 目标（对应第 4 节截图）。
+| 项目 | 仿真 | 真机 |
+| --- | --- | --- |
+| 视觉计算 | 本机 | Jetson Nano / Raspberry Pi 4 等机载电脑 |
+| 通信桥 | 本机运行 Agent | 机载电脑跑 Agent，飞控经串口/网口连接 |
+| 飞行安全 | 无风险 | 必须加 GPS 返航、围栏、急停开关 |
+| 硬件 | 无 | 需避障、桨叶护罩、备用电池 |
 
-**Q4：QGroundControl 显示 "Not Ready"？**
+### 8.2 代码工程化（实习加分项）
 
-未解锁或未切 Offboard 模式属于正常状态。SITL 通过 UDP 14540 自动连接；若一直连不上，确认 PX4 SITL 已启动且防火墙未阻断 14540 端口（对应第 5 节截图）。
+- 使用 ROS2 **参数（Parameter）** 替代硬编码的 `Kp`、颜色阈值；
+- 使用 **Launch 文件** 组织多节点与参数配置；
+- 编写 **unit test** 验证颜色阈值与误差计算；
+- 使用 Git 管理版本、写好 README 与参数说明。
 
-**Q5：**`ros2 topic list`**&#x20;看不到&#x20;**`/fmu/out/*`**？**
+### 8.3 面试与实习准备
 
-Micro XRCE-DDS Agent 未启动或 PX4 未连接。确认 `MicroXRCEAgent udp4 -p 8888` 已运行，且 PX4 已启用 `uxrce_dds_client` 模块。连接成功后即可看到全部 `/fmu/out/*` 话题（对应第 6 节截图）。
+视觉追踪是典型的“感知 + 控制”综合项目，实习面试可重点准备：
 
-**Q6：解锁后立刻翻机？**
+- 讲清楚**机外控制的时序约束**（先模式后解锁、持续下发）；
+- 能现场画出**感知→控制→PX4 的 ROS2 话题/节点图**；
+- 说明 OpenCV 颜色分割的**局限性与改进**（光照、动态阈值、换用深度学习检测）；
+- 展示仿真 → 真机的**安全意识与降级策略**（丢目标时悬停）。
 
-控制循环中断或模式切换顺序错误。确保 10Hz 定时器持续运行、先切 Offboard（command=176, param2=6）再 ARM（command=400）。
+## 9. 常见问题
 
+**Q1：`ros2 topic list` 看不到 `/fmu/out/...` 话题？**
+多半是 MicroXRCEAgent 未启动或 PX4 未连接。先 `MicroXRCEAgent udp4 -p 8888`，再启动 PX4，确认 Agent 终端出现 `[Client connected]` 提示。
 
+**Q2：无人机起飞后立刻失控/翻机？**
+Offboard 模式未在解锁前完成切换，或设定点下发频率过低。确保先切 Offboard 再 Arm，且控制循环 ≥10Hz，并在解锁后持续下发。
 
-***
+**Q3：启动 PX4 编译报缺少依赖？**
+未跑完 `./Tools/setup/ubuntu.sh`。该脚本会安装 Gazebo 与所有依赖；国内网络失败时改用国内镜像或手动逐个安装 Gazebo Classic。
 
-> 本文档基于 Ubuntu 22.04.5 LTS + VMware 虚拟机真实操作记录，环境版本：ROS2 Humble、PX4 release/1.18、Gazebo Sim、QGroundControl。
+**Q4：视觉检测框频繁闪烁/追踪抖动？**
+颜色阈值过宽或噪声未滤除。增大最小轮廓面积阈值、加强形态学操作，或对质心做一阶低通滤波（`cx = 0.7*cx_old + 0.3*cx_new`）。
+
+**Q5：`colcon build` 提示 `px4_msgs` 未找到？**
+`px4_msgs` 必须与功能包在同一工作空间 `src` 下，且先编译一次。确认 `source install/setup.bash` 已执行。
+
+**Q6：Gazebo 弹窗卡死或模型加载慢？**
+先 `killall gzserver gzclient` 清掉残留实例，重新启动；并确保主机内存 ≥4GB、开启硬件加速。
+
+**Q7：真机上视觉延迟高？**
+OpenCV 默认在 CPU 跑，可改用 `cv2` 的 `dnn` 后处理或换 Jetson 的 CUDA 加速；同时把图像分辨率降到 640×480、检测帧率降到 20Hz。
+
+---
+
+> 本文档对应“PX4 + ROS2 + OpenCV 无人机视觉追踪”从环境搭建到实习准备的全流程，可作为教程章节或实习培训材料使用。
