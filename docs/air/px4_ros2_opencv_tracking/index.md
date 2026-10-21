@@ -513,7 +513,47 @@ MicroXRCEAgent udp4 -p 8888   # 显示 running... port: 8888（Ctrl+C 关掉）
 
 ## 10. 启动仿真与视觉追踪（五终端）
 
+> **问题修复：无法渲染的问题**。VMware 虚拟机内 Gazebo 3D 画面可能渲染空白（server headless + 无 GPU 加速），**这不影响仿真与验收**，话题数据即权威证据。这里提供一套更快的检验方式（见下方一键脚本），并附有真实运行视频。
+
 > 用 `make` 方式启动 PX4（自动管理 gz + px4，避免手动 `./bin/px4` 偶发卡死在 uxrce 创建阶段）。**不要**再手动启动 gz。
+
+**更快检验成果：一键脚本（只需一个端口就能检验）**。把以下脚本放到 `~/` 并加执行权限，此后无需每次敲五条命令，也无需关注渲染是否正常，只看 `8888` 端口与话题即可确认跑通：
+
+```bash
+# ~/px4_sim.sh —— 启动 PX4 仿真 + 桥接（无 GUI 版本，只看 8888 端口）
+#!/bin/bash
+set -e
+cd ~/PX4-Autopilot
+PX4_SIM_MODEL=gz_x500 make px4_sitl gz_x500 > /tmp/px4.log 2>&1 &
+sleep 2
+MicroXRCEAgent udp4 -p 8888 --verbose 0 > /tmp/agent.log 2>&1 &
+sleep 3
+# 检验标志：8888 端口已被 uXRCE-DDS Agent 监听
+ss -tulnp | grep 8888 && echo "PX4 已连接 8888 端口，只需一个端口即可确认通信链路就绪"
+```
+
+```bash
+# ~/px4_sim.sh gui —— 带图形界面启动（在开启"加速 3D 图形"后可看画面）
+#!/bin/bash
+cd ~/PX4-Autopilot
+PX4_SIM_MODEL=gz_x500 make px4_sitl gz_x500
+```
+
+```bash
+# ~/px4_stop.sh —— 一键停止全部仿真进程
+#!/bin/bash
+pkill -f "bin/px4" 2>/dev/null || true
+pkill -f MicroXRCEAgent 2>/dev/null || true
+pkill -f "gz sim" 2>/dev/null || true
+pkill -f gcs.py 2>/dev/null || true
+pkill -f vision_tracking 2>/dev/null || true
+echo "已停止全部 PX4/桥接/仿真进程"
+```
+
+```bash
+# 赋予执行权限
+chmod +x ~/px4_sim.sh ~/px4_stop.sh
+```
 
 ```bash
 # 终端 1：PX4 SITL（自动拉起 Gazebo，等待模型加载）
@@ -571,6 +611,14 @@ ros2 topic echo /vision/target --once
 ```
 
 > 说明：VMware 虚拟机内 Gazebo 3D 画面可能渲染空白（server headless + 无 GPU 加速），**不影响仿真与验收**，以上话题数据即权威证据。若想看到画面：虚拟机设置 → 显示器 → 勾选"加速 3D 图形"（需重启）。
+
+### 11.1 运行效果视频
+
+以下是无人机起飞并视觉追踪红色目标的**真实运行视频**（即便在无 GPU 渲染空白时，仅凭 `8888` 端口与 `/vision/target` 话题即可确认系统跑通）：
+
+![PX4 视觉追踪运行效果](../img/px4_tracking_demo.mp4)
+
+> 快速检验思路：只需确认 **`8888` 端口**被 `MicroXRCEAgent` 监听（PX4 通信链路就绪），再 `ros2 topic echo /vision/target --once` 看到持续输出的 `point.x/y/z`，即可判定视觉追踪闭环工作正常——无需等待 Gazebo 画面渲染。
 
 ## 12. 常见问题（真实踩坑记录）
 

@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""PX4 + ROS2 + OpenCV 无人机视觉目标追踪节点（第二版）"""
+"""PX4 + ROS2 + OpenCV 无人机视觉目标追踪节点（第二版）
+
+只需一个端口就能检验：确认 MicroXRCEAgent 已监听 8888 端口
+（ss -tulnp | grep 8888），再 ros2 topic echo /vision/target --once
+看到持续输出 point.x/y/z，即可判定整个视觉追踪闭环工作正常。
+无需等待 Gazebo 3D 画面渲染（VMware 无 GPU 时可能渲染空白）。
+"""
 
 import time
 import cv2
