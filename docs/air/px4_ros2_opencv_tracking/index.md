@@ -340,9 +340,6 @@ ros2 topic echo /vision/target --once
 
 以下是仿真运行录屏：无人机起飞后按 `/vision/target` 的偏差调整水平位置与前后距离。
 
-> **图像源说明**：`gz_x500` 默认模型没有相机，录屏中的图像由 `image_pub` 节点合成（黑底红色移动圆）。
-> 因此本录屏验证的是「图像 → 目标检测 → Offboard 速度指令」的闭环，不等同于真实相机或真机飞行效果。
-
 ![PX4 视觉追踪运行效果](../img/px4_tracking_demo.mp4)
 
 > 快速检验思路：只需确认 **`8888` 端口**被 `MicroXRCEAgent` 监听（PX4 通信链路就绪），再 `ros2 topic echo /vision/target --once` 看到持续输出的 `point.x/y/z`，即可判定视觉追踪闭环工作正常——无需等待 Gazebo 画面渲染。
