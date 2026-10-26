@@ -1,6 +1,6 @@
 # PX4 + ROS2 + OpenCV 无人机视觉追踪
 
-本文档在 **Ubuntu 22.04.5 LTS**（VMware 虚拟机，16 核 / 7G 内存）PX4 v1.18 + ROS2 Humble + Gazebo Sim 8 + OpenCV，仿真无人机起飞并自动追踪红色目标。每一步都给出命令与"完成标志"，全部命令均已实际验证。
+本文档在 **Ubuntu 22.04.5 LTS**（VMware 虚拟机，16 核 / 7G 内存）PX4 v1.18 + ROS2 Humble + Gazebo Sim 8 + OpenCV，仿真无人机起飞并自动追踪红色目标。每一步都给出命令与"完成标志"。第 2–7、9–11 节的命令均在本机实际执行验证；第 8 节是从本仓库获取功能包并编译，因此不再内嵌代码。
 
 > 
 
@@ -22,14 +22,14 @@
 
 ```
 ~/ws_px4/src/
-├── px4_msgs/              # release/1.18 分支（浅克隆）
-├── px4_ros_com/           # 桥接与示例（main 分支）
-└── vision_tracking/       # 视觉追踪功能包（修正版）
+├── px4_msgs/               # release/1.18 分支（浅克隆）
+├── px4_ros_com/            # 桥接与示例（main 分支）
+└── px4_ros2_opencv_tracking/    # 视觉追踪功能包（来自本仓库 src/air）
     ├── package.xml
     ├── setup.py
-    ├── resource/vision_tracking
-    ├── launch/vision_tracking.launch.py
-    └── vision_tracking/            # Python 包目录（脚本放这里，勿放 scripts/）
+    ├── resource/px4_ros2_opencv_tracking
+    ├── launch/tracking_launch.py
+    └── px4_ros2_opencv_tracking/     # Python 包目录（脚本放这里，勿放 scripts/）
         ├── __init__.py
         ├── image_pub.py
         ├── color_tracker.py
@@ -182,318 +182,41 @@ git clone --depth 1 https://github.com/PX4/px4_ros_com.git
 ls ~/ws_px4/src    # 看到 px4_msgs  px4_ros_com
 ```
 
-## 8. vision_tracking 功能包（修正版完整代码）
+## 8. px4_ros2_opencv_tracking 功能包
 
-> 修正点：① 三个核心脚本放在 `vision_tracking/` **包目录内**（与 setup.py 的 `vision_tracking.xxx:main` 入口匹配，否则 import 失败）；② launch 的 `executable` **不带 .py**；③ `PointStamped` 坐标在 `.point` 子消息；④ `DO_SET_MODE` 的 `param1=1.0`；⑤ OffboardControlMode 需 `position+velocity` 双通道。
-
-**① 目录与基础文件**：
-
-```bash
-mkdir -p ~/ws_px4/src/vision_tracking/{launch,resource,vision_tracking}
-```
-
-**② package.xml**：
+本仓库已提供现成功能包 `src/air/px4_ros2_opencv_tracking`（标准 ament_python 包，含 launch），
+**不需要手工抄代码**，拷进工作空间编译即可：
 
 ```bash
-cat > ~/ws_px4/src/vision_tracking/package.xml << 'EOF'
-<?xml version="1.0"?>
-<package format="3">
-  <name>vision_tracking</name>
-  <version>0.0.1</version>
-  <description>PX4 vision-based target tracking with OpenCV and offboard control</description>
-  <maintainer email="user@todo.todo">user</maintainer>
-  <license>Apache-2.0</license>
-  <exec_depend>rclpy</exec_depend>
-  <exec_depend>sensor_msgs</exec_depend>
-  <exec_depend>geometry_msgs</exec_depend>
-  <exec_depend>cv_bridge</exec_depend>
-  <exec_depend>px4_msgs</exec_depend>
-  <exec_depend>python3-opencv</exec_depend>
-  <exec_depend>python3-numpy</exec_depend>
-  <export>
-    <build_type>ament_python</build_type>
-  </export>
-</package>
-EOF
-```
-
-**③ setup.py**：
-
-```bash
-cat > ~/ws_px4/src/vision_tracking/setup.py << 'EOF'
-from setuptools import find_packages, setup
-import os
-from glob import glob
-
-package_name = 'vision_tracking'
-
-setup(
-    name=package_name,
-    version='0.0.1',
-    packages=find_packages(),
-    data_files=[
-        ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
-        ('share/' + package_name, ['package.xml']),
-        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
-    ],
-    install_requires=['setuptools'],
-    zip_safe=True,
-    maintainer='user',
-    maintainer_email='user@todo.todo',
-    description='PX4 vision target tracking',
-    license='Apache-2.0',
-    entry_points={
-        'console_scripts': [
-            'image_pub = vision_tracking.image_pub:main',
-            'color_tracker = vision_tracking.color_tracker:main',
-            'offboard_control = vision_tracking.offboard_control:main',
-        ],
-    },
-)
-EOF
-```
-
-**④ resource 与包初始化**：
-
-```bash
-echo "vision_tracking" > ~/ws_px4/src/vision_tracking/resource/vision_tracking
-touch ~/ws_px4/src/vision_tracking/vision_tracking/__init__.py
-```
-
-**⑤ launch（executable 不带 .py）**：
-
-```bash
-cat > ~/ws_px4/src/vision_tracking/launch/vision_tracking.launch.py << 'EOF'
-from launch import LaunchDescription
-from launch_ros.actions import Node
-
-
-def generate_launch_description():
-    return LaunchDescription([
-        Node(package='vision_tracking', executable='image_pub', name='image_pub', output='screen'),
-        Node(package='vision_tracking', executable='color_tracker', name='color_tracker', output='screen'),
-        Node(package='vision_tracking', executable='offboard_control', name='offboard_control', output='screen'),
-    ])
-EOF
-```
-
-**⑥ image_pub.py**（合成 640x480 黑底红色移动圆，10Hz）：
-
-```bash
-cat > ~/ws_px4/src/vision_tracking/vision_tracking/image_pub.py << 'EOF'
-#!/usr/bin/env python3
-import cv2
-import numpy as np
-import rclpy
-from rclpy.node import Node
-from sensor_msgs.msg import Image
-from cv_bridge import CvBridge
-
-
-class ImagePub(Node):
-    def __init__(self):
-        super().__init__('image_pub')
-        self.pub = self.create_publisher(Image, '/camera/image_raw', 10)
-        self.bridge = CvBridge()
-        self.t = 0.0
-        self.create_timer(0.1, self.publish_image)
-
-    def publish_image(self):
-        img = np.zeros((480, 640, 3), dtype=np.uint8)
-        cx = int(320 + 200 * np.sin(self.t * 0.8))
-        cy = int(240 + 150 * np.sin(self.t * 0.5 + 1.0))
-        cv2.circle(img, (cx, cy), 35, (0, 0, 255), -1)
-        self.t += 0.1
-        msg = self.bridge.cv2_to_imgmsg(img, encoding='bgr8')
-        msg.header.stamp = self.get_clock().now().to_msg()
-        self.pub.publish(msg)
-
-
-def main(args=None):
-    rclpy.init(args=args)
-    node = ImagePub()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
-
-
-if __name__ == '__main__':
-    main()
-EOF
-```
-
-**⑦ color_tracker.py**（HSV 红双区间 + 轮廓质心，发布到 /vision/target；**坐标在 p.point.x/y/z**）：
-
-```bash
-cat > ~/ws_px4/src/vision_tracking/vision_tracking/color_tracker.py << 'EOF'
-#!/usr/bin/env python3
-import cv2
-import numpy as np
-import rclpy
-from rclpy.node import Node
-from sensor_msgs.msg import Image
-from geometry_msgs.msg import PointStamped
-from cv_bridge import CvBridge
-
-
-class ColorTracker(Node):
-    def __init__(self):
-        super().__init__('color_tracker')
-        self.sub = self.create_subscription(Image, '/camera/image_raw', self.image_cb, 10)
-        self.pub = self.create_publisher(PointStamped, '/vision/target', 10)
-        self.bridge = CvBridge()
-        self.h, self.w = 480, 640
-        self.min_area = 300.0
-
-    def image_cb(self, msg):
-        try:
-            frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
-        except Exception:
-            return
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        mask1 = cv2.inRange(hsv, (0, 100, 100), (10, 255, 255))
-        mask2 = cv2.inRange(hsv, (160, 100, 100), (180, 255, 255))
-        mask = cv2.bitwise_or(mask1, mask2)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        p = PointStamped()
-        p.header.stamp = self.get_clock().now().to_msg()
-        p.header.frame_id = 'camera'
-        p.point.z = 0.0
-        if cnts:
-            c = max(cnts, key=cv2.contourArea)
-            area = cv2.contourArea(c)
-            if area > self.min_area:
-                M = cv2.moments(c)
-                if M['m00'] > 0:
-                    p.point.x = float(M['m10'] / M['m00'] - self.w / 2.0)
-                    p.point.y = float(M['m01'] / M['m00'] - self.h / 2.0)
-                    p.point.z = float(area)
-        self.pub.publish(p)
-
-
-def main(args=None):
-    rclpy.init(args=args)
-    node = ColorTracker()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
-
-
-if __name__ == '__main__':
-    main()
-EOF
-```
-
-**⑧ offboard_control.py**（修正版：OffboardControlMode position+velocity 双通道；DO_SET_MODE param1=1.0、param2=6.0；ARM param1=1.0；分步状态机）：
-
-```bash
-cat > ~/ws_px4/src/vision_tracking/vision_tracking/offboard_control.py << 'EOF'
-#!/usr/bin/env python3
-import rclpy
-from rclpy.node import Node
-from geometry_msgs.msg import PointStamped
-from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand
-
-
-class OffboardControl(Node):
-    K_Y = 0.12
-    K_Z = 0.08
-    K_D = 0.02
-    DESIRED_AREA = 15000.0
-    MAX_V = 1.5
-    TAKEOFF_ALT = -2.0
-
-    def __init__(self):
-        super().__init__('offboard_control')
-        self.off_pub = self.create_publisher(OffboardControlMode, '/fmu/in/offboard_control_mode', 10)
-        self.traj_pub = self.create_publisher(TrajectorySetpoint, '/fmu/in/trajectory_setpoint', 10)
-        self.cmd_pub = self.create_publisher(VehicleCommand, '/fmu/in/vehicle_command', 10)
-        self.create_subscription(PointStamped, '/vision/target', self.target_cb, 10)
-        self.dx = self.dy = self.area = 0.0
-        self.start = self.get_clock().now()
-        self._armed = False
-        self.create_timer(0.1, self.control)
-
-    def target_cb(self, msg):
-        self.dx = msg.point.x
-        self.dy = msg.point.y
-        self.area = msg.point.z
-
-    def send_cmd(self, cmd, p1, p2):
-        vc = VehicleCommand()
-        vc.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        vc.command = cmd
-        vc.param1 = p1
-        vc.param2 = p2
-        vc.target_system = 1
-        vc.target_component = 1
-        vc.source_system = 1
-        vc.source_component = 1
-        self.cmd_pub.publish(vc)
-
-    def control(self):
-        now = self.get_clock().now()
-        t = (now - self.start).nanoseconds * 1e-9
-
-        om = OffboardControlMode()
-        om.timestamp = int(now.nanoseconds / 1000)
-        om.position = True
-        om.velocity = True
-        self.off_pub.publish(om)
-
-        ts = TrajectorySetpoint()
-        ts.timestamp = int(now.nanoseconds / 1000)
-        ts.position = [float('nan'), float('nan'), self.TAKEOFF_ALT]
-        vx = max(-self.MAX_V, min(self.MAX_V, self.K_D * (self.DESIRED_AREA - self.area)))
-        vy = max(-self.MAX_V, min(self.MAX_V, -self.K_Y * self.dx))
-        vz = max(-self.MAX_V, min(self.MAX_V, -self.K_Z * self.dy))
-        ts.velocity = [vx, vy, vz]
-        ts.yaw = 0.0
-        self.traj_pub.publish(ts)
-
-        if 2.0 < t < 2.2:
-            self.send_cmd(176, 1.0, 6.0)
-            self.get_logger().info('Offboard mode set')
-        if t > 2.5 and not self._armed:
-            self.send_cmd(400, 1.0, 0.0)
-            self._armed = True
-            self.get_logger().info('ARM sent')
-
-
-def main(args=None):
-    rclpy.init(args=args)
-    node = OffboardControl()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
-
-
-if __name__ == '__main__':
-    main()
-EOF
-```
-
-**⑨ 编译**：
-
-```bash
+# 克隆本仓库（已克隆可跳过）
+git clone https://github.com/OpenHUTB/ros2.git ~/ros2
+# 拷入工作空间
+cp -r ~/ros2/src/air/px4_ros2_opencv_tracking ~/ws_px4/src/
 cd ~/ws_px4
 source /opt/ros/humble/setup.bash
-export PATH=/usr/bin:$PATH
-colcon build --merge-install
+colcon build --packages-select px4_ros2_opencv_tracking
 ```
 
-> 必须加 `--merge-install`（默认布局下 ament_index 找不到 vision_tracking 包）。
+**包内三个节点**：
+
+| 可执行文件 | 作用 | 订阅 / 发布 |
+| --- | --- | --- |
+| `image_pub` | 合成 640×480 黑底红色移动圆（10 Hz） | 发布 `/camera/image_raw` |
+| `color_tracker` | HSV 红色双区间 + 轮廓质心 | `/camera/image_raw` → `/vision/target`（`point.x/y` 为偏移像素，`point.z` 为目标面积） |
+| `offboard_control` | 图像偏差 → PX4 Offboard 速度指令 | `/vision/target` → `/fmu/in/offboard_control_mode`、`/fmu/in/trajectory_setpoint`、`/fmu/in/vehicle_command` |
+
+`launch/tracking_launch.py` 一次拉起三个节点。
 
 **✅ 完成标志**：
 
 ```bash
 source ~/ws_px4/install/setup.bash
-ros2 pkg executables vision_tracking   # 列出 image_pub / color_tracker / offboard_control
-python3 -c "import vision_tracking.color_tracker; print('IMPORT OK')"   # 输出 IMPORT OK
+ros2 pkg executables px4_ros2_opencv_tracking   # 列出 color_tracker image_pub offboard_control
 ```
 
-若 `IMPORT OK` 失败：确认脚本确实在 `vision_tracking/` 包目录内（不是 scripts/），然后 `colcon build --merge-install --packages-select vision_tracking` 重编。
+> 若 `ros2 pkg executables` 看不到包：确认三个脚本确实在 `px4_ros2_opencv_tracking/` 包目录内
+> （与 setup.py 的 `px4_ros2_opencv_tracking.xxx:main` 入口对应），再
+> `colcon build --packages-select px4_ros2_opencv_tracking` 重编。
 
 ## 9. 构建 MicroXRCEAgent（PX4 ↔ ROS2 桥接器）
 
@@ -546,7 +269,7 @@ pkill -f "bin/px4" 2>/dev/null || true
 pkill -f MicroXRCEAgent 2>/dev/null || true
 pkill -f "gz sim" 2>/dev/null || true
 pkill -f gcs.py 2>/dev/null || true
-pkill -f vision_tracking 2>/dev/null || true
+pkill -f px4_ros2_opencv_tracking 2>/dev/null || true
 echo "已停止全部 PX4/桥接/仿真进程"
 ```
 
@@ -583,8 +306,9 @@ python3 /tmp/gcs.py &
 source /opt/ros/humble/setup.bash && source ~/ws_px4/install/setup.bash
 ros2 topic list | grep -c "^/fmu"        # ✅ ≥ 60
 ros2 topic echo /fmu/out/failsafe_flags --once | grep gcs_connection_lost   # ✅ false
-ros2 launch vision_tracking vision_tracking.launch.py
-# ✅ 标志：3 个节点启动；offboard_control 打印 Offboard mode set / ARM sent
+ros2 launch px4_ros2_opencv_tracking tracking_launch.py
+# ✅ 标志：image_pub / color_tracker / offboard_control 三个节点启动；
+#          offboard_control 打印 Offboard mode set / ARM sent
 ```
 
 ## 11. 最终验收
@@ -614,7 +338,10 @@ ros2 topic echo /vision/target --once
 
 ### 11.1 运行效果视频
 
-以下是无人机起飞并视觉追踪红色目标的**真实运行视频**（即便在无 GPU 渲染空白时，仅凭 `8888` 端口与 `/vision/target` 话题即可确认系统跑通）：
+以下是仿真运行录屏：无人机起飞后按 `/vision/target` 的偏差调整水平位置与前后距离。
+
+> **图像源说明**：`gz_x500` 默认模型没有相机，录屏中的图像由 `image_pub` 节点合成（黑底红色移动圆）。
+> 因此本录屏验证的是「图像 → 目标检测 → Offboard 速度指令」的闭环，不等同于真实相机或真机飞行效果。
 
 ![PX4 视觉追踪运行效果](../img/px4_tracking_demo.mp4)
 
@@ -634,8 +361,8 @@ PX4 全量子模块 + 编译需要 25G+。扩容：VMware 设置加磁盘 → `s
 **Q4：编译报 `No module named 'empy/jsonschema/jinja2'`？**
 执行第 6 节 ④（`pip install -r Tools/setup/requirements.txt`）一次补齐后重跑 `make`。
 
-**Q5：`ros2 launch` 报 `ModuleNotFoundError: vision_tracking.xxx`？**
-脚本没有放进 `vision_tracking/` 包目录（setup.py 入口 `vision_tracking.xxx:main` 找不到模块）。把三个 .py 放到包目录（第 8 节结构），重 `colcon build --merge-install --packages-select vision_tracking`。
+**Q5：`ros2 launch` 报 `ModuleNotFoundError: px4_ros2_opencv_tracking.xxx`？**
+三个脚本没有放进 `px4_ros2_opencv_tracking/` 包目录（setup.py 入口是 `px4_ros2_opencv_tracking.xxx:main`）。按第 8 节结构放置后，重 `colcon build --packages-select px4_ros2_opencv_tracking`。
 
 **Q6：ARM 被拒，日志 `No connection to the GCS` / `gcs_connection_lost: true`？**
 PX4 1.18 的 HealthAndArmingChecks 把 GCS 连接作为解锁前置。运行第 10 节终端 3 的 pymavlink 心跳（`udpout:127.0.0.1:18570`，1Hz），等 `failsafe_flags.gcs_connection_lost=false` 后重启 launch 重新 ARM。
@@ -657,8 +384,8 @@ NumPy 2.x 与系统 OpenCV 不兼容：`/usr/bin/python3 -m pip install "numpy==
 | #   | 问题                                                                | 修正                                       |
 | --- | ----------------------------------------------------------------- | ---------------------------------------- |
 | 1   | 原始 README 中 launch 的 executable 带 `.py`，ROS2 找不到                  | `executable='image_pub'`（不带 .py）         |
-| 2   | 脚本放在 `scripts/` 但 setup.py 入口指向 `vision_tracking.xxx` → import 失败 | 脚本放入 `vision_tracking/` 包目录              |
-| 3   | `colcon build` 默认布局导致包不可见                                         | 必须 `--merge-install`                     |
+| 2   | 脚本放在 `scripts/` 但 setup.py 入口指向 `px4_ros2_opencv_tracking.xxx` → import 失败 | 脚本放入 `px4_ros2_opencv_tracking/` 包目录       |
+| 3   | launch 的 `executable` 与包内可执行名不一致（带 `.py` 或旧节点名）                    | 统一为 `image_pub` / `color_tracker` / `offboard_control` |
 | 4   | `PointStamped` 无顶层 `x/y/z`，坐标在 `.point` 子消息                       | 全部使用 `p.point.x/y/z` / `msg.point.x/y/z` |
 | 5   | `DO_SET_MODE(176)` 的 `param1=0` 在 1.18 无效                         | `param1=1.0, param2=6.0`                 |
 | 6   | OffboardControlMode 仅 `velocity=True` 时位置设定点不生效                   | `position=True, velocity=True` 双通道       |
@@ -676,7 +403,7 @@ ros2 topic echo /fmu/out/vehicle_status_v4 --once | grep -E "arming_state|nav_st
 ros2 topic echo /fmu/out/vehicle_local_position_v1 --once | grep "^z:"
 
 # 重启整套
-pkill -f "bin/px4" ; pkill -f MicroXRCEAgent ; pkill -f "gz sim" ; pkill -f gcs.py ; pkill -f vision_tracking
+pkill -f "bin/px4" ; pkill -f MicroXRCEAgent ; pkill -f "gz sim" ; pkill -f gcs.py ; pkill -f px4_ros2_opencv_tracking
 ```
 
 ---

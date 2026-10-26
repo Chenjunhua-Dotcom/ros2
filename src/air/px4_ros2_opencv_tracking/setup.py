@@ -14,14 +14,16 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='user',
-    maintainer_email='user@todo.todo',
+    maintainer='Chenjunhua',
+    maintainer_email='chenjunhua@users.noreply.github.com',
     description='PX4 + ROS2 + OpenCV 无人机视觉目标追踪',
     license='MIT',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'tracking_node = px4_ros2_opencv_tracking.node:main',
+            'image_pub = px4_ros2_opencv_tracking.image_pub:main',
+            'color_tracker = px4_ros2_opencv_tracking.color_tracker:main',
+            'offboard_control = px4_ros2_opencv_tracking.offboard_control:main',
         ],
     },
 )
